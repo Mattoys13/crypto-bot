@@ -41,11 +41,20 @@ def send_alert(coin, price, change, volume, rsi, macd_signal, link):
               f"🔗 Wykres: {link}"
     bot.send_message(CHAT_ID, message, parse_mode="Markdown")
 
+# === WYSYŁKA INFO O BŁĘDZIE API ===
+def send_error(message_text):
+    bot.send_message(CHAT_ID, f"⚠️ Błąd API: {message_text}")
+
 # === ANALIZA CEX (Binance) ===
 def scan_binance():
     url = "https://api.binance.com/api/v3/ticker/24hr"
-    response = requests.get(url)
-    data = response.json()
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+    except Exception as e:
+        print("❌ Błąd pobierania Binance:", e)
+        send_error(f"Binance API error: {e}")
+        return
 
     for coin in data:
         symbol = coin['symbol']
@@ -56,21 +65,36 @@ def scan_binance():
         price = float(coin['lastPrice'])
 
         # Pobranie świec do RSI/MACD
-        klines = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=100").json()
-        closes = pd.Series([float(k[4]) for k in klines])
-        rsi = calculate_rsi(closes).iloc[-1]
-        macd, signal_line = calculate_macd(closes)
-        macd_signal = macd.iloc[-1] > signal_line.iloc[-1]
+        try:
+            klines = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=100").json()
+            closes = pd.Series([float(k[4]) for k in klines])
+            rsi = calculate_rsi(closes).iloc[-1]
+            macd, signal_line = calculate_macd(closes)
+            macd_signal = macd.iloc[-1] > signal_line.iloc[-1]
 
-        if price_change >= PRICE_CHANGE_THRESHOLD and rsi < 70 and macd_signal:
-            send_alert(symbol.replace("USDT", ""), price, price_change, volume, rsi, macd_signal,
-                       f"https://www.tradingview.com/symbols/{symbol}/")
+            if price_change >= PRICE_CHANGE_THRESHOLD and rsi < 70 and macd_signal:
+                send_alert(symbol.replace("USDT", ""), price, price_change, volume, rsi, macd_signal,
+                           f"https://www.tradingview.com/symbols/{symbol}/")
+        except Exception as e:
+            print(f"❌ Błąd analizy {symbol}: {e}")
+            send_error(f"Analiza {symbol} error: {e}")
 
 # === ANALIZA DEX (DexScreener) ===
 def scan_dex():
     url = "https://api.dexscreener.com/latest/dex/tokens"
-    response = requests.get(url).json()
-    for pair in response.get("pairs", []):
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            print(f"❌ Błąd pobierania z DexScreener: {response.status_code}")
+            send_error(f"DexScreener HTTP {response.status_code}")
+            return
+        data = response.json()
+    except Exception as e:
+        print("❌ Błąd odczytu API DexScreener:", e)
+        send_error(f"DexScreener API error: {e}")
+        return
+
+    for pair in data.get("pairs", []):
         price = float(pair["priceUsd"])
         change_15m = float(pair.get("priceChange", {}).get("m15", 0))
         volume_24h = float(pair.get("volume", {}).get("h24", 0))
@@ -79,7 +103,9 @@ def scan_dex():
         if change_15m >= PRICE_CHANGE_THRESHOLD and volume_24h > 100_000:
             send_alert(token, price, change_15m, volume_24h, 50, True, pair["url"])
 
-print("🤖 Bot uruchomiony. Skanuję rynek CEX i DEX...")
+# === START BOTA ===
+print("🤖 Bot uruchomiony. Wysyłam testową wiadomość na Telegram...")
+bot.send_message(CHAT_ID, "✅ Bot został uruchomiony i działa poprawnie!")
 
 while True:
     scan_binance()
