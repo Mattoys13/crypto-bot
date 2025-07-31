@@ -4,18 +4,22 @@ import telebot
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import os
+from flask import Flask, jsonify
+import threading
 
 # === KONFIGURACJA ===
 API_KEY = "8330502624:AAEr5TliWy66wQm9EX02OUuGeWoslYjWeUY"
 CHAT_ID = "7743162708"
 bot = telebot.TeleBot(API_KEY)
 
-PRICE_CHANGE_THRESHOLD = 20   # % zmiany ceny w 15 min
-VOLUME_SPIKE_THRESHOLD = 300  # % wzrost wolumenu w 15 min
-SCAN_INTERVAL = 300           # skanowanie co 5 min
-API_ERROR_INTERVAL = 1800     # powiadomienie o błędzie API co 30 min max
+PRICE_CHANGE_THRESHOLD = 20       # % zmiany ceny w 15 min
+VOLUME_SPIKE_THRESHOLD = 300      # % wzrost wolumenu w 15 min
+SCAN_INTERVAL = 300               # skanowanie co 5 min
+API_ERROR_INTERVAL = 1800         # powiadomienie o błędzie API co 30 min max
 
-last_api_error_time = 0  # kontrola powiadomień o błędach API
+last_api_error_time = 0           # kontrola powiadomień o błędach API
+signals_list = []                 # lista sygnałów do dashboardu
 
 # === FUNKCJE TECHNICZNE ===
 def calculate_rsi(prices, period=14):
@@ -36,19 +40,6 @@ def calculate_macd(prices, short=12, long=26, signal=9):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line
 
-# === WYSYŁKA ALERTU ===
-def send_alert(title, message):
-    bot.send_message(CHAT_ID, f"🔔 *{title}*\n\n{message}", parse_mode="Markdown")
-
-# === OGRANICZENIE POWIADOMIEŃ O BŁĘDACH API ===
-def send_api_error(message_text):
-    global last_api_error_time
-    now = time.time()
-    if now - last_api_error_time > API_ERROR_INTERVAL:
-        bot.send_message(CHAT_ID, f"⚠️ Błąd API: {message_text}")
-        last_api_error_time = now
-
-# === ALERT WOLUMENU ===
 def detect_volume_spike(volume_data):
     if len(volume_data) < 2:
         return False
@@ -58,19 +49,37 @@ def detect_volume_spike(volume_data):
         return True
     return False
 
-# === COINMARKETCAL: SPRAWDZANIE EVENTÓW ===
+# === WYSYŁKA ALERTÓW ===
+def send_alert(title, message):
+    global signals_list
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    signals_list.append({"time": timestamp, "title": title, "message": message})
+    if len(signals_list) > 50:  # przechowujemy max 50 sygnałów
+        signals_list.pop(0)
+    bot.send_message(CHAT_ID, f"🔔 *{title}*\n\n{message}", parse_mode="Markdown")
+
+def send_api_error(message_text):
+    global last_api_error_time
+    now = time.time()
+    if now - last_api_error_time > API_ERROR_INTERVAL:
+        bot.send_message(CHAT_ID, f"⚠️ Błąd API: {message_text}")
+        last_api_error_time = now
+
+# === COINMARKETCAL: EVENTY ===
 def fetch_coinmarketcal_events():
+    api_key = os.getenv("CMC_API_KEY")  # Klucz z Railway Variables
+    if not api_key:
+        print("⚠️ Brak klucza API CoinMarketCal (CMC_API_KEY)")
+        return
     url = "https://developers.coinmarketcal.com/v1/events"
-   import os
-headers = {"x-api-key": os.getenv("CMC_API_KEY")}
-  # Wymaga prawdziwego klucza API przy produkcji
+    headers = {"x-api-key": api_key}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
             events = []
             for ev in data.get("body", []):
-                events.append(f"{ev['title']} - {ev['coins'][0]['symbol']} ({ev['date']})")
+                events.append(f"📅 {ev['title']} - {ev['coins'][0]['symbol']} ({ev['date']})")
             if events:
                 send_alert("Nowe wydarzenia (CoinMarketCal):", "\n".join(events[:5]))
     except Exception as e:
@@ -108,8 +117,6 @@ def scan_binance():
         ema50 = calculate_ema(closes, 50).iloc[-1]
         macd, signal_line = calculate_macd(closes)
         macd_signal = macd.iloc[-1] > signal_line.iloc[-1]
-
-        # Wykrycie wolumenu
         vol_spike = detect_volume_spike(volumes)
 
         if rsi < 70 and macd_signal:
@@ -149,13 +156,24 @@ def scan_dex():
     if signals:
         send_alert("Wybicia (DEX)", "\n\n".join(signals))
 
-# === GŁÓWNA PĘTLA ===
+# === DASHBOARD WEBOWY ===
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return jsonify({"signals": signals_list})
+
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+# === START BOTA ===
 print("🤖 Bot uruchomiony. Skanuję rynek CEX, DEX i eventy CoinMarketCal...")
 bot.send_message(CHAT_ID, "✅ Bot został uruchomiony i działa poprawnie!")
+
+threading.Thread(target=run_flask).start()
 
 while True:
     scan_binance()
     scan_dex()
     fetch_coinmarketcal_events()
     time.sleep(SCAN_INTERVAL)
-
