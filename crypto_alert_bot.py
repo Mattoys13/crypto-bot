@@ -17,6 +17,7 @@ PRICE_CHANGE_THRESHOLD = 20       # % zmiany ceny w 15 min
 VOLUME_SPIKE_THRESHOLD = 300      # % wzrost wolumenu w 15 min
 SCAN_INTERVAL = 300               # skanowanie co 5 min
 API_ERROR_INTERVAL = 1800         # powiadomienie o błędzie API co 30 min max
+MUTE_DEX_ERRORS = True            # wyciszenie błędów DexScreener na Telegramie
 
 last_api_error_time = 0           # kontrola powiadomień o błędach API
 signals_list = []                 # lista sygnałów do dashboardu
@@ -54,20 +55,23 @@ def send_alert(title, message):
     global signals_list
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     signals_list.append({"time": timestamp, "title": title, "message": message})
-    if len(signals_list) > 50:  # przechowujemy max 50 sygnałów
+    if len(signals_list) > 50:
         signals_list.pop(0)
     bot.send_message(CHAT_ID, f"🔔 *{title}*\n\n{message}", parse_mode="Markdown")
 
-def send_api_error(message_text):
+def send_api_error(message_text, mute=False):
     global last_api_error_time
     now = time.time()
+    if mute:
+        print(f"⚠️ [MUTED] {message_text}")
+        return
     if now - last_api_error_time > API_ERROR_INTERVAL:
         bot.send_message(CHAT_ID, f"⚠️ Błąd API: {message_text}")
         last_api_error_time = now
 
 # === COINMARKETCAL: EVENTY ===
 def fetch_coinmarketcal_events():
-    api_key = os.getenv("CMC_API_KEY")  # Klucz API z Railway Variables
+    api_key = os.getenv("CMC_API_KEY")
     if not api_key:
         print("⚠️ Brak klucza API CoinMarketCal (CMC_API_KEY)")
         return
@@ -79,7 +83,8 @@ def fetch_coinmarketcal_events():
             data = response.json()
             events = []
             for ev in data.get("body", []):
-                title = ev.get("title", "Brak tytułu")
+                title_data = ev.get("title", {})
+                title = title_data.get("en", "Brak tytułu") if isinstance(title_data, dict) else str(title_data)
                 symbol = ev.get("coins", [{}])[0].get("symbol", "???")
                 date = ev.get("date", "Brak daty")
                 events.append(f"📅 {title} - {symbol} ({date})")
@@ -138,12 +143,12 @@ def scan_dex():
     try:
         response = requests.get(url, timeout=10)
         if response.status_code != 200:
-            send_api_error(f"DexScreener HTTP {response.status_code}")
+            send_api_error(f"DexScreener HTTP {response.status_code}", mute=MUTE_DEX_ERRORS)
             return
         data = response.json()
     except Exception as e:
         print("❌ DexScreener API error:", e)
-        send_api_error(f"DexScreener API: {e}")
+        send_api_error(f"DexScreener API: {e}", mute=MUTE_DEX_ERRORS)
         return
 
     signals = []
@@ -218,3 +223,4 @@ while True:
     scan_dex()
     fetch_coinmarketcal_events()
     time.sleep(SCAN_INTERVAL)
+
