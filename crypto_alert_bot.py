@@ -70,7 +70,10 @@ def send_api_error(message_text, mute=False):
         last_api_error_time = now
 
 # === COINMARKETCAL: EVENTY ===
+last_sent_events = []  # pamiętamy ostatnio wysłane wydarzenia
+
 def fetch_coinmarketcal_events():
+    global last_sent_events
     api_key = os.getenv("CMC_API_KEY")
     if not api_key:
         print("⚠️ Brak klucza API CoinMarketCal (CMC_API_KEY)")
@@ -87,11 +90,17 @@ def fetch_coinmarketcal_events():
                 title = title_data.get("en", "Brak tytułu") if isinstance(title_data, dict) else str(title_data)
                 symbol = ev.get("coins", [{}])[0].get("symbol", "???")
                 date = ev.get("date", "Brak daty")
-                events.append(f"📅 {title} - {symbol} ({date})")
-            if events:
-                send_alert("Nowe wydarzenia (CoinMarketCal):", "\n".join(events[:5]))
+                event_text = f"📅 {title} - {symbol} ({date})"
+                events.append(event_text)
+
+            # Filtruj tylko nowe eventy
+            new_events = [e for e in events if e not in last_sent_events]
+            if new_events:
+                send_alert("Nowe wydarzenia (CoinMarketCal):", "\n".join(new_events[:5]))
+                last_sent_events = events  # aktualizujemy listę
     except Exception as e:
         print("❌ CoinMarketCal API error:", e)
+
 
 # === ANALIZA CEX (Binance) ===
 def scan_binance():
