@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, render_template_string
 import threading
 
 # === KONFIGURACJA ===
@@ -67,7 +67,7 @@ def send_api_error(message_text):
 
 # === COINMARKETCAL: EVENTY ===
 def fetch_coinmarketcal_events():
-    api_key = os.getenv("CMC_API_KEY")  # Klucz z Railway Variables
+    api_key = os.getenv("CMC_API_KEY")  # Klucz API z Railway Variables
     if not api_key:
         print("⚠️ Brak klucza API CoinMarketCal (CMC_API_KEY)")
         return
@@ -156,12 +156,9 @@ def scan_dex():
     if signals:
         send_alert("Wybicia (DEX)", "\n\n".join(signals))
 
-# === DASHBOARD WEBOWY ===
-from flask import Flask, jsonify, render_template_string
-
+# === DASHBOARD HTML ===
 app = Flask(__name__)
 
-# Szablon HTML dla dashboardu
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="pl">
@@ -204,6 +201,14 @@ HTML_TEMPLATE = """
 def dashboard():
     return render_template_string(HTML_TEMPLATE, signals=signals_list)
 
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+# === START BOTA ===
+print("🤖 Bot uruchomiony. Skanuję rynek CEX, DEX i eventy CoinMarketCal...")
+bot.send_message(CHAT_ID, "✅ Bot został uruchomiony i działa poprawnie!")
+
+threading.Thread(target=run_flask).start()
 
 while True:
     scan_binance()
