@@ -79,7 +79,10 @@ def fetch_coinmarketcal_events():
             data = response.json()
             events = []
             for ev in data.get("body", []):
-                events.append(f"📅 {ev['title']} - {ev['coins'][0]['symbol']} ({ev['date']})")
+                title = ev.get("title", "Brak tytułu")
+                symbol = ev.get("coins", [{}])[0].get("symbol", "???")
+                date = ev.get("date", "Brak daty")
+                events.append(f"📅 {title} - {symbol} ({date})")
             if events:
                 send_alert("Nowe wydarzenia (CoinMarketCal):", "\n".join(events[:5]))
     except Exception as e:
