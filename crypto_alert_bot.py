@@ -13,14 +13,17 @@ API_KEY = "8330502624:AAEr5TliWy66wQm9EX02OUuGeWoslYjWeUY"
 CHAT_ID = "7743162708"
 bot = telebot.TeleBot(API_KEY)
 
-PRICE_CHANGE_THRESHOLD = 20       # % zmiany ceny w 15 min
-VOLUME_SPIKE_THRESHOLD = 300      # % wzrost wolumenu w 15 min
-SCAN_INTERVAL = 300               # skanowanie co 5 min
-API_ERROR_INTERVAL = 1800         # powiadomienie o błędzie API co 30 min max
-MUTE_DEX_ERRORS = True            # wyciszenie błędów DexScreener na Telegramie
+PRICE_CHANGE_THRESHOLD = 20
+VOLUME_SPIKE_THRESHOLD = 300
+SCAN_INTERVAL = 300
+API_ERROR_INTERVAL = 1800
+MUTE_DEX_ERRORS = True
+DAILY_REPORT_HOUR = 20  # godzina raportu dziennego (0-23)
 
-last_api_error_time = 0           # kontrola powiadomień o błędach API
-signals_list = []                 # lista sygnałów do dashboardu
+last_api_error_time = 0
+signals_list = []
+last_sent_events = []
+last_daily_report = None
 
 # === FUNKCJE TECHNICZNE ===
 def calculate_rsi(prices, period=14):
@@ -28,29 +31,34 @@ def calculate_rsi(prices, period=14):
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
 def calculate_ema(prices, period=20):
     return prices.ewm(span=period, adjust=False).mean()
 
-def calculate_macd(prices, short=12, long=26, signal=9):
-    ema_short = prices.ewm(span=short, adjust=False).mean()
-    ema_long = prices.ewm(span=long, adjust=False).mean()
-    macd = ema_short - ema_long
-    signal_line = macd.ewm(span=signal, adjust=False).mean()
-    return macd, signal_line
+def calculate_bollinger(prices, period=20):
+    sma = prices.rolling(window=period).mean()
+    std = prices.rolling(window=period).std()
+    upper_band = sma + (std * 2)
+    lower_band = sma - (std * 2)
+    return upper_band, lower_band
+
+def detect_candle_pattern(prices):
+    if len(prices) < 2:
+        return None
+    last = prices.iloc[-1]
+    prev = prices.iloc[-2]
+    if last['close'] > last['open'] and prev['close'] < prev['open'] and last['close'] > prev['open']:
+        return "Bullish Engulfing"
+    if last['close'] < last['open'] and prev['close'] > prev['open'] and last['close'] < prev['open']:
+        return "Bearish Engulfing"
+    return None
 
 def detect_volume_spike(volume_data):
     if len(volume_data) < 2:
         return False
-    last_vol = volume_data[-1]
-    prev_vol = volume_data[-2]
-    if prev_vol > 0 and ((last_vol - prev_vol) / prev_vol) * 100 >= VOLUME_SPIKE_THRESHOLD:
-        return True
-    return False
+    return ((volume_data[-1] - volume_data[-2]) / volume_data[-2]) * 100 >= VOLUME_SPIKE_THRESHOLD
 
-# === WYSYŁKA ALERTÓW ===
 def send_alert(title, message):
     global signals_list
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -69,47 +77,73 @@ def send_api_error(message_text, mute=False):
         bot.send_message(CHAT_ID, f"⚠️ Błąd API: {message_text}")
         last_api_error_time = now
 
-# === COINMARKETCAL: EVENTY ===
-last_sent_events = []  # pamiętamy ostatnio wysłane wydarzenia
-
-def fetch_coinmarketcal_events():
-    global last_sent_events
-    api_key = os.getenv("CMC_API_KEY")
-    if not api_key:
-        print("⚠️ Brak klucza API CoinMarketCal (CMC_API_KEY)")
-        return
-    url = "https://developers.coinmarketcal.com/v1/events"
-    headers = {"x-api-key": api_key}
+# === RAPORT DZIENNY ===
+def generate_daily_report():
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            events = []
-            for ev in data.get("body", []):
-                title_data = ev.get("title", {})
-                title = title_data.get("en", "Brak tytułu") if isinstance(title_data, dict) else str(title_data)
-                symbol = ev.get("coins", [{}])[0].get("symbol", "???")
-                date = ev.get("date", "Brak daty")
-                event_text = f"📅 {title} - {symbol} ({date})"
-                events.append(event_text)
+        url = "https://api.binance.com/api/v3/ticker/24hr"
+        data = requests.get(url, timeout=10).json()
+        usdt_pairs = [c for c in data if c['symbol'].endswith("USDT")]
 
-            # Filtruj tylko nowe eventy
-            new_events = [e for e in events if e not in last_sent_events]
-            if new_events:
-                send_alert("Nowe wydarzenia (CoinMarketCal):", "\n".join(new_events[:5]))
-                last_sent_events = events  # aktualizujemy listę
+        # --- TOP GAINERS / LOSERS ---
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['priceChangePercent']), reverse=True)
+        top_gainers = sorted_pairs[:5]
+        top_losers = sorted_pairs[-5:]
+
+        # --- TOP VOLUME ---
+        top_volume = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)[:5]
+
+        # --- BTC i ETH ---
+        btc = next(x for x in usdt_pairs if x['symbol'] == "BTCUSDT")
+        eth = next(x for x in usdt_pairs if x['symbol'] == "ETHUSDT")
+
+        # --- Fear & Greed Index ---
+        try:
+            fng = requests.get("https://api.alternative.me/fng/", timeout=10).json()
+            fng_value = fng["data"][0]["value"]
+            fng_class = fng["data"][0]["value_classification"]
+        except:
+            fng_value, fng_class = "?", "Brak danych"
+
+        # --- Trend rynku (EMA i RSI dla BTC) ---
+        klines = requests.get("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=100").json()
+        df = pd.DataFrame(klines, columns=["time","open","high","low","close","volume","c1","c2","c3","c4","c5","c6"])
+        df["close"] = df["close"].astype(float)
+        ema20 = df["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+        ema50 = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+        rsi = calculate_rsi(df["close"]).iloc[-1]
+        trend = "🐂 Bullish" if ema20 > ema50 and rsi < 70 else "🐻 Bearish" if ema20 < ema50 and rsi > 30 else "⚖ Neutral"
+
+        # --- Raport ---
+        msg = f"📊 *RAPORT DZIENNY – {datetime.now().strftime('%d.%m.%Y')}*\n\n"
+        msg += f"💰 *BTC:* ${float(btc['lastPrice']):,.2f} | 24h: {btc['priceChangePercent']}%\n"
+        msg += f"💰 *ETH:* ${float(eth['lastPrice']):,.2f} | 24h: {eth['priceChangePercent']}%\n"
+        msg += f"📈 *Trend rynku:* {trend}\n"
+        msg += f"😨 *Fear & Greed Index:* {fng_value} ({fng_class})\n\n"
+
+        msg += "🚀 *TOP GAINERS:*\n"
+        for g in top_gainers:
+            msg += f"{g['symbol']} | {g['priceChangePercent']}% | Cena: ${float(g['lastPrice']):.4f}\n"
+
+        msg += "\n🔻 *TOP LOSERS:*\n"
+        for l in top_losers:
+            msg += f"{l['symbol']} | {l['priceChangePercent']}% | Cena: ${float(l['lastPrice']):.4f}\n"
+
+        msg += "\n📊 *TOP VOLUME:*\n"
+        for v in top_volume:
+            vol = float(v['quoteVolume'])/1_000_000
+            msg += f"{v['symbol']} | Vol: ${vol:.2f}M | Cena: ${float(v['lastPrice']):.4f}\n"
+
+        send_alert("Raport dzienny", msg)
     except Exception as e:
-        print("❌ CoinMarketCal API error:", e)
+        print(f"❌ Błąd raportu dziennego: {e}")
 
-
-# === ANALIZA CEX (Binance) ===
+# === ANALIZA BINANCE ===
 def scan_binance():
     url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
         response = requests.get(url, timeout=10)
         data = response.json()
     except Exception as e:
-        print("❌ Binance API error:", e)
         send_api_error(f"Binance API: {e}")
         return
 
@@ -122,58 +156,31 @@ def scan_binance():
         if price_change < PRICE_CHANGE_THRESHOLD:
             continue
 
-        volume = float(coin['quoteVolume'])
         price = float(coin['lastPrice'])
+        klines = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=50").json()
+        df = pd.DataFrame(klines, columns=["time","open","high","low","close","volume","c1","c2","c3","c4","c5","c6"])
+        df["open"] = df["open"].astype(float)
+        df["close"] = df["close"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["volume"] = df["volume"].astype(float)
 
-        klines = requests.get(f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=100").json()
-        closes = pd.Series([float(k[4]) for k in klines])
-        volumes = [float(k[5]) for k in klines]
+        rsi = calculate_rsi(df["close"]).iloc[-1]
+        ema20 = calculate_ema(df["close"], 20).iloc[-1]
+        ema50 = calculate_ema(df["close"], 50).iloc[-1]
+        upper_band, lower_band = calculate_bollinger(df["close"])
+        candle_pattern = detect_candle_pattern(df[["open","close","high","low"]].tail(2))
 
-        rsi = calculate_rsi(closes).iloc[-1]
-        ema20 = calculate_ema(closes, 20).iloc[-1]
-        ema50 = calculate_ema(closes, 50).iloc[-1]
-        macd, signal_line = calculate_macd(closes)
-        macd_signal = macd.iloc[-1] > signal_line.iloc[-1]
-        vol_spike = detect_volume_spike(volumes)
+        msg = f"💎 {symbol}\n💰 Cena: ${price:.4f}\n📈 Zmiana: {price_change:.2f}%\n📊 RSI: {rsi:.2f}\n📊 EMA20: {ema20:.4f}\n📊 EMA50: {ema50:.4f}\n📊 Bollinger: [{upper_band.iloc[-1]:.4f} / {lower_band.iloc[-1]:.4f}]\n"
+        if candle_pattern:
+            msg += f"🕯 Formacja: {candle_pattern}\n"
 
-        if rsi < 70 and macd_signal:
-            message = f"💎 {symbol}\n💰 Cena: ${price:.4f}\n📈 Zmiana: {price_change:.2f}%\n📊 RSI: {rsi:.2f}\n📊 EMA20: {ema20:.4f}\n📊 EMA50: {ema50:.4f}\n"
-            if vol_spike:
-                message += "🔥 Nagły wzrost wolumenu!\n"
-            message += f"🔗 [Wykres](https://www.tradingview.com/symbols/{symbol})"
-            signals.append(message)
-
-    if signals:
-        send_alert("Wybicia (CEX Binance)", "\n\n".join(signals))
-
-# === ANALIZA DEX (DexScreener) ===
-def scan_dex():
-    url = "https://api.dexscreener.com/latest/dex/tokens"
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            send_api_error(f"DexScreener HTTP {response.status_code}", mute=MUTE_DEX_ERRORS)
-            return
-        data = response.json()
-    except Exception as e:
-        print("❌ DexScreener API error:", e)
-        send_api_error(f"DexScreener API: {e}", mute=MUTE_DEX_ERRORS)
-        return
-
-    signals = []
-    for pair in data.get("pairs", []):
-        price = float(pair["priceUsd"])
-        change_15m = float(pair.get("priceChange", {}).get("m15", 0))
-        volume_24h = float(pair.get("volume", {}).get("h24", 0))
-        token = pair["baseToken"]["symbol"]
-
-        if change_15m >= PRICE_CHANGE_THRESHOLD and volume_24h > 100_000:
-            signals.append(f"💎 {token}\n💰 Cena: ${price:.4f}\n📈 Zmiana: {change_15m:.2f}%\n🔗 [Wykres]({pair['url']})")
+        signals.append(msg)
 
     if signals:
-        send_alert("Wybicia (DEX)", "\n\n".join(signals))
+        send_alert("Sygnały techniczne (CEX Binance)", "\n\n".join(signals))
 
-# === DASHBOARD HTML ===
+# === DASHBOARD ===
 app = Flask(__name__)
 
 HTML_TEMPLATE = """
@@ -221,15 +228,18 @@ def dashboard():
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-# === START BOTA ===
-print("🤖 Bot uruchomiony. Skanuję rynek CEX, DEX i eventy CoinMarketCal...")
+# === GŁÓWNA PĘTLA ===
+print("🤖 Bot uruchomiony...")
 bot.send_message(CHAT_ID, "✅ Bot został uruchomiony i działa poprawnie!")
-
 threading.Thread(target=run_flask).start()
 
 while True:
-    scan_binance()
-    scan_dex()
-    fetch_coinmarketcal_events()
-    time.sleep(SCAN_INTERVAL)
+    now = datetime.now()
 
+    scan_binance()
+
+    if last_daily_report != now.date() and now.hour == DAILY_REPORT_HOUR:
+        generate_daily_report()
+        last_daily_report = now.date()
+
+    time.sleep(SCAN_INTERVAL)
