@@ -157,20 +157,53 @@ def scan_dex():
         send_alert("Wybicia (DEX)", "\n\n".join(signals))
 
 # === DASHBOARD WEBOWY ===
+from flask import Flask, jsonify, render_template_string
+
 app = Flask(__name__)
 
+# Szablon HTML dla dashboardu
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>Crypto Bot Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #121212; color: #fff; text-align: center; }
+        h1 { color: #00e676; }
+        table { margin: auto; border-collapse: collapse; width: 80%; background: #1e1e1e; }
+        th, td { border: 1px solid #333; padding: 10px; }
+        th { background: #00e676; color: black; }
+        tr:nth-child(even) { background: #2a2a2a; }
+        a { color: #00e676; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <h1>📊 Crypto Alert Bot Dashboard</h1>
+    <table>
+        <tr>
+            <th>Czas</th>
+            <th>Tytuł</th>
+            <th>Wiadomość</th>
+        </tr>
+        {% for signal in signals %}
+        <tr>
+            <td>{{ signal.time }}</td>
+            <td>{{ signal.title }}</td>
+            <td>{{ signal.message | safe }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    <p>🔄 Automatyczne odświeżanie co 60s</p>
+    <script>setTimeout(() => location.reload(), 60000);</script>
+</body>
+</html>
+"""
+
 @app.route('/')
-def home():
-    return jsonify({"signals": signals_list})
+def dashboard():
+    return render_template_string(HTML_TEMPLATE, signals=signals_list)
 
-def run_flask():
-    app.run(host="0.0.0.0", port=8080)
-
-# === START BOTA ===
-print("🤖 Bot uruchomiony. Skanuję rynek CEX, DEX i eventy CoinMarketCal...")
-bot.send_message(CHAT_ID, "✅ Bot został uruchomiony i działa poprawnie!")
-
-threading.Thread(target=run_flask).start()
 
 while True:
     scan_binance()
