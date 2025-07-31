@@ -103,9 +103,7 @@ def scan_dex():
         if change_15m >= PRICE_CHANGE_THRESHOLD and volume_24h > 100_000:
             send_alert(token, price, change_15m, volume_24h, 50, True, pair["url"])
 
-# === START BOTA ===
-print("🤖 Bot uruchomiony. Wysyłam testową wiadomość na Telegram...")
-bot.send_message(CHAT_ID, "✅ Bot został uruchomiony i działa poprawnie!")
+print("🤖 Bot uruchomiony. Skanuję rynek CEX i DEX...")
 
 while True:
     scan_binance()
