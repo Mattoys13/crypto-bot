@@ -9,7 +9,7 @@ API_KEY = "8330502624:AAEr5TliWy66wQm9EX02OUuGeWoslYjWeUY"
 CHAT_ID = "7743162708"
 bot = telebot.TeleBot(API_KEY)
 
-PRICE_CHANGE_THRESHOLD = 30   # % zmiany ceny w 15 min
+PRICE_CHANGE_THRESHOLD = 20   # % zmiany ceny w 15 min
 VOLUME_CHANGE_THRESHOLD = 200 # % wzrost wolumenu w 30 min
 SCAN_INTERVAL = 300           # co ile sekund skanować (300s = 5 min)
 
